@@ -38,7 +38,7 @@ Thumbs.db
 *.ckpt
 *.pt
 *.pth
-data/
+/data/
 outputs/
 wandb/
 mlruns/

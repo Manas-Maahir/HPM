@@ -1,0 +1,13 @@
+name: vggface2
+root: data/vggface2
+image_size: 224
+
+# sigma values are primary experimental variables — sweep them.
+# Grounded in Sergent (1982): right=low-SF/global, left=high-SF/local.
+freq_split:
+  sigma_hi: 1.0    # high-pass: img − GaussianBlur(img, sigma_hi)
+  sigma_lo: 3.0    # low-pass:  GaussianBlur(img, sigma_lo)
+  enabled: true
+
+val_fraction: 0.1
+test_fraction: 0.1

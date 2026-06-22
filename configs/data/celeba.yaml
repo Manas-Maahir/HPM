@@ -1,0 +1,34 @@
+name: celeba
+root: data/celeba
+image_size: 224
+
+# Flat CelebA layout (Kaggle jessicali9530/celeba-dataset).
+image_dir: img_align_celeba
+identity_file: identity_CelebA.txt
+splits_dir: null            # null → <root>/splits ; set to a Drive path to persist
+
+freq_split:
+  sigma_hi: 1.0
+  sigma_lo: 3.0
+  enabled: true
+
+# Mild, holism-preserving augmentation (applied per view, before the freq split).
+augmentation:
+  scale_min: 0.8           # narrow RandomResizedCrop scale — keep face configuration
+  scale_max: 1.0
+  ratio_min: 0.9
+  ratio_max: 1.1
+  hflip_p: 0.5
+  brightness: 0.2
+  contrast: 0.2
+  saturation: 0.2
+  hue: 0.0
+
+# PK sampler — P identities × K images per batch (in-batch positives guaranteed).
+sampler:
+  P: 16
+  K: 4                     # → batch 64 (T4-friendly)
+  num_batches: null        # null → len(dataset) // (P*K)
+
+val_fraction: 0.1
+test_fraction: 0.1
