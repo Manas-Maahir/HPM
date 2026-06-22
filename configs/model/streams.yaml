@@ -1,0 +1,15 @@
+# Local stream — CNN (L-FFA / featural / high-SF).
+local:
+  backbone: resnet50
+  pretrained: true
+  pretrained_path: null        # null = timm ImageNet weights; path to InsightFace .pth = ArcFace
+  out_channels: 2048           # ResNet50 layer4 output channels
+
+# Global stream — ViT (R-FFA / holistic / low-SF).
+# pretrained MUST stay true — see CLAUDE.md constraint 1.
+global_:
+  backbone: deit_small_patch16_224
+  pretrained: true
+  out_channels: 384          # DeiT-Small embed dim
+
+image_size: 224

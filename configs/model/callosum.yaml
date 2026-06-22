@@ -1,0 +1,10 @@
+# Corpus callosum — bidirectional cross-attention between streams.
+#
+# lesion_gain: 1.0 = full interhemispheric transfer
+#              0.0 = split-brain (no exchange)
+# lesion_gain is a NON-PERSISTENT buffer; re-apply from config after every
+# load_state_dict via model.callosum.set_lesion_gain(cfg.model.callosum.lesion_gain).
+callosum:
+  depth: 1
+  heads: 4
+  lesion_gain: 1.0

@@ -1,0 +1,6 @@
+# @package _global_
+# Control: task/role bias (CNN=local, ViT=global), no frequency split.
+# Tests: is the architectural mechanism bias alone sufficient for asymmetry?
+data:
+  freq_split:
+    enabled: false

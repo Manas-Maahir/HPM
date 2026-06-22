@@ -1,0 +1,11 @@
+# @package _global_
+# Control: CNN gets holistic job (low-SF input), ViT gets featural job (high-SF input).
+# Key test: asymmetry must be tied to mechanism, not arbitrary stream assignment.
+# A finding that does NOT survive crossover does not support the biological claim.
+data:
+  freq_split:
+    sigma_hi: 3.0    # swapped: CNN now receives the low-SF (global) input
+    sigma_lo: 1.0    # swapped: ViT now receives the high-SF (local) input
+model:
+  fusion:
+    query: L         # left stream (ViT) now plays the dominant role

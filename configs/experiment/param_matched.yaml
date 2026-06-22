@@ -1,0 +1,5 @@
+# @package _global_
+# Control: equalize stream capacities so asymmetry cannot be explained by
+# parameter count alone. Mandatory for any finding to be defensible.
+model:
+  match_params: true

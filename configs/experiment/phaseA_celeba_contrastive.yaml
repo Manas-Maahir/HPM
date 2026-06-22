@@ -1,0 +1,48 @@
+# @package _global_
+# Milestone 1 (contrastive): supervised-contrastive identity embedding on CelebA.
+# Establish the global/local asymmetry on z_F before adding reconstruction losses.
+# Use with: data=celeba. Decoders are off (memory) — only embeddings are needed.
+
+defaults:
+  - override /data: celeba
+
+model:
+  build_decoders: false        # skip read-out decoders this milestone (save T4 memory)
+  contrastive:
+    enabled: true
+    loss: supcon               # supcon (default) | arcface
+    temperature: 0.07
+    proj_dim: 128
+    proj_hidden: 256
+    arcface_scale: 30.0
+    arcface_margin: 0.5
+
+train:
+  seed: 42
+  max_epochs: 50
+  batch_size: 64               # eval/verification loader batch
+  num_workers: 2
+
+  # Differential learning rates (pretrained backbones low, new modules high).
+  lr_backbone: 1.0e-5
+  lr_new: 1.0e-3
+  optimizer:
+    _target_: torch.optim.AdamW
+    weight_decay: 0.05
+
+  warmup_steps: 500            # linear warmup → cosine decay (per optimizer step)
+  freeze_epochs: 0             # >0 freezes both backbones for the first N epochs
+  grad_accum: 1               # >1 → larger effective batch (e.g. 2 → eff. batch 128)
+  amp: true
+  max_steps: null              # set small (e.g. 300) for the §7.1 smoke test
+
+  loss_weights:                # unused by contrastive trainer; kept for compatibility
+    lambda_id: 1.0
+    lambda_uni: 0.0
+    lambda_aux: 0.0
+
+  checkpoint:
+    dir: checkpoints/phaseA_celeba_contrastive   # point at a Drive path on Colab
+    save_every_steps: 0        # >0 → also save last.pt every N optimizer steps
+    best_metric: roc_auc
+    verification_pairs: 10000

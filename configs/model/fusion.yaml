@@ -1,0 +1,7 @@
+# Right-dominant latent fusion.
+# query: R (default, biologically right-dominant) | L | symmetric
+# ablate: true → bypass attention, concat instead (ablation control)
+fusion:
+  query: R
+  ablate: false
+  heads: 4

@@ -1,0 +1,7 @@
+# @package _global_
+# Control: full callosum lesion — no interhemispheric transfer (split-brain).
+# lesion_gain is a non-persistent buffer; this config value is applied via
+# model.callosum.set_lesion_gain(cfg.model.callosum.lesion_gain) after every load.
+model:
+  callosum:
+    lesion_gain: 0.0

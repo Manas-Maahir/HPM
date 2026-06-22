@@ -1,0 +1,18 @@
+seed: 42
+max_epochs: 50
+batch_size: 32
+
+optimizer:
+  _target_: torch.optim.AdamW
+  lr: 1.0e-4
+  weight_decay: 0.05
+
+scheduler:
+  _target_: torch.optim.lr_scheduler.CosineAnnealingLR
+  T_max: 50
+
+# Milestone 1: identity only. Enable aux at M2, unified at M3.
+loss_weights:
+  lambda_id: 1.0
+  lambda_uni: 0.0
+  lambda_aux: 0.0

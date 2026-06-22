@@ -1,0 +1,6 @@
+# @package _global_
+# Control: bypass fusion attention entirely — concat the two latents instead.
+# Tests: is the cross-attention fusion doing work beyond simple concatenation?
+model:
+  fusion:
+    ablate: true

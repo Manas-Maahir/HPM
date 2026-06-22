@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Environments
+.env
+.venv
+venv/
+env/
+
+# Testing / linting caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Graphify outputs
+graphify-out/
+
+# Claude Code config (private)
+.claude/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Model checkpoints and data (large files)
+*.ckpt
+*.pt
+*.pth
+data/
+outputs/
+wandb/
+mlruns/

@@ -1,0 +1,10 @@
+defaults:
+  - streams
+  - callosum
+  - fusion
+
+# Common latent width shared across streams, callosum, and fusion.
+d_model: 256
+
+# Set true in param_matched control to equalize backbone capacities.
+match_params: false

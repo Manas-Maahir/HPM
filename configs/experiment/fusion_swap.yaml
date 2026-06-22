@@ -1,0 +1,6 @@
+# @package _global_
+# Control: swap fusion query from R (right-dominant) to L (left-dominant).
+# Tests: is the right-dominant integration actually doing meaningful work?
+model:
+  fusion:
+    query: L

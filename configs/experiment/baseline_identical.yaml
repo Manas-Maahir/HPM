@@ -1,0 +1,13 @@
+# @package _global_
+# Control: both streams use the same backbone with no frequency split.
+# Tests: does generic two-stream learning alone produce asymmetry?
+model:
+  local:
+    backbone: resnet50
+    pretrained: true
+  global_:
+    backbone: resnet50
+    pretrained: true
+data:
+  freq_split:
+    enabled: false
