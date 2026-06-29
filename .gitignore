@@ -40,5 +40,6 @@ Thumbs.db
 *.pth
 /data/
 outputs/
+runs/
 wandb/
 mlruns/
