@@ -1,0 +1,15 @@
+Environment — rebuild it, do NOT copy .venv/
+.venv contains machine-specific CUDA binaries tied to this GPU/driver — copying it across machines breaks. Recreate on the other PC:
+
+
+py -3.13 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -U pip
+# pick the CUDA build matching THAT PC's GPU/driver (cu124 works for most recent NVIDIA):
+.\.venv\Scripts\python.exe -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+.\.venv\Scripts\python.exe -m pip install -e ".[dev]"
+
+
+python -c "import torch; print(torch.cuda.is_available())
+
+.\.venv\Scripts\python.exe train_hpm.py --dataset celeba --data data/celeba --smoke-test
+.\.venv\Scripts\python.exe train_hpm.py --dataset celeba --data data/celeba --mode hpm --name run1 --epochs 50 --amp --workers 4
