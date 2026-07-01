@@ -45,26 +45,32 @@ STEP 3 — Verify setup  (~60 s, strongly recommended)
 THE OVERNIGHT COMMAND  (single line — start and walk away)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-    python train_hpm.py --dataset celeba --data data/celeba --mode all --name overnight --epochs 50 --amp --workers 4
+    python train_hpm.py --dataset celeba --data data/celeba --mode all \
+        --name overnight --epochs 50 --seeds 42,43,44 --workers 4
 
   --mode all      train CNN → ViT → HPM in sequence
-  --name overnight  save everything under runs/hpm/overnight_{cnn,vit,hpm}/
-  --epochs 50     50 epochs per model  (adjust to taste)
-  --amp           automatic mixed precision (CUDA only; omit on CPU / Apple MPS)
+  --name overnight  save everything under runs/hpm/overnight_{cnn,vit,hpm}_seed{seed}/
+  --epochs 50     max epochs per model  (early-stops after --patience epochs w/o gain)
+  --seeds 42,43,44  train every model on each seed → mean ± SD across seeds in the report
   --workers 4     DataLoader worker processes
+  (AMP is ON by default on CUDA; add --no-amp to disable.  --patience defaults to 3.)
 
 TO RESUME AFTER A CRASH — re-run the exact same command.
-  The script reads each model's last.pt, skips completed models, and resumes
+  The script reads each (model, seed) last.pt, skips completed runs, and resumes
   the interrupted one from the last finished epoch.  No flags needed.
 
 OUTPUT FILES:
     runs/hpm/
-      overnight.log               ← full tee'd training log
-      overnight_cnn/weights/best.pt
-      overnight_cnn/weights/last.pt
-      overnight_cnn/results.csv
-      overnight_vit/…
-      overnight_hpm/…
+      overnight.log                       ← full tee'd training log
+      overnight_report.xlsx               ← metrics workbook (mean ± SD across seeds)
+      overnight_cnn_seed42/weights/best.pt
+      overnight_cnn_seed42/weights/last.pt
+      overnight_cnn_seed42/results.csv
+      overnight_vit_seed42/…
+      overnight_hpm_seed42/…
+
+    # Rebuild the workbook later without retraining:
+    python train_hpm.py --report-only --name overnight --seeds 42,43,44
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 OTHER USEFUL COMMANDS
@@ -97,17 +103,23 @@ import random
 import sys
 import time
 import traceback
+import warnings
 from collections import defaultdict
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Optional
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torchvision.transforms as T
 import torchvision.transforms.functional as TF
 from PIL import Image
+from sklearn.metrics import (
+    balanced_accuracy_score,
+    f1_score,
+    precision_score,
+    recall_score,
+)
 from torch import Tensor
 from torch.utils.data import DataLoader, Dataset
 
@@ -139,7 +151,7 @@ IMAGENET_STD  = [0.229, 0.224, 0.225]
 class LocalConfig:
     backbone: str = "resnet50"
     pretrained: bool = True
-    pretrained_path: Optional[str] = None
+    pretrained_path: str | None = None
     out_channels: int = 2048             # ResNet50 layer4 output channels
 
 
@@ -196,8 +208,8 @@ class TrainConfig:
     batch_size: int = 32
     lr: float = 1e-4
     weight_decay: float = 0.05
-    patience: int = 0                   # early-stopping patience (0 = disabled)
-    amp: bool = False                   # automatic mixed precision (CUDA only)
+    patience: int = 3                   # early-stopping patience (0 = disabled)
+    amp: bool = True                    # automatic mixed precision (CUDA only)
     workers: int = 4
     loss_weights: LossWeightsConfig = field(default_factory=LossWeightsConfig)
 
@@ -385,9 +397,9 @@ class HPMOutput:
     z_L: Tensor
     z_R: Tensor
     z_F: Tensor
-    local_percept: Optional[Tensor] = None
-    global_percept: Optional[Tensor] = None
-    unified_percept: Optional[Tensor] = None
+    local_percept: Tensor | None = None
+    global_percept: Tensor | None = None
+    unified_percept: Tensor | None = None
 
 
 class HPMModel(nn.Module):
@@ -543,9 +555,9 @@ class LossWeighter(nn.Module):
         self,
         logits: Tensor,
         labels: Tensor,
-        unified_pred: Optional[Tensor],
-        local_pred: Optional[Tensor],
-        global_pred: Optional[Tensor],
+        unified_pred: Tensor | None,
+        local_pred: Tensor | None,
+        global_pred: Tensor | None,
         target: Tensor,
     ) -> LossComponents:
         id_ = self.id_loss(logits, labels)
@@ -719,7 +731,7 @@ class Trainer:
             args.json     — full config snapshot
     """
 
-    def __init__(self, cfg: HPMConfig, name: str, resume: Optional[str] = None) -> None:
+    def __init__(self, cfg: HPMConfig, name: str, resume: str | None = None) -> None:
         self.cfg         = cfg
         self.name        = name
         self.resume_path = resume
@@ -782,6 +794,7 @@ class Trainer:
                 "scheduler":    self.scheduler.state_dict(),
                 "epoch":        self.current_epoch,
                 "best_fitness": self.best_fitness,
+                "no_improve":   self.no_improve,
                 "cfg":          asdict(self.cfg),
             },
             self.wts_dir / f"{tag}.pt",
@@ -805,6 +818,7 @@ class Trainer:
         self.scheduler.load_state_dict(ckpt["scheduler"])
         self.start_epoch  = ckpt["epoch"] + 1
         self.best_fitness = ckpt.get("best_fitness", 0.0)
+        self.no_improve   = ckpt.get("no_improve", 0)   # keep early-stop counter across resume
         print(f"  Resumed at epoch {self.start_epoch},  best_fitness={self.best_fitness:.4f}")
 
     # ── main ───────────────────────────────────────────────────────────────────
@@ -868,7 +882,7 @@ class Trainer:
         (self.save_dir / "args.json").write_text(json.dumps(asdict(self.cfg), indent=2))
 
         # ── epoch loop ──────────────────────────────────────────────────────────
-        COL = f"{'Epoch':>6}  {'GPU-mem':>8}  {'loss':>9}  {'id_loss':>8}  {'top1':>8}  {'top5':>8}  {'lr':>9}"
+        COL = f"{'Epoch':>6}  {'GPU-mem':>8}  {'loss':>9}  {'id_loss':>8}  {'top1':>8}  {'top5':>8}  {'f1':>8}  {'lr':>9}"
         print()
         print(COL)
         print("─" * len(COL))
@@ -884,7 +898,8 @@ class Trainer:
             pbar = tqdm(
                 train_loader,
                 desc=f"  {epoch:3d}/{self.cfg.train.max_epochs - 1}",
-                ncols=105,
+                dynamic_ncols=True,   # follow the real terminal width → no bar-per-batch wrap
+                mininterval=0.5,      # throttle redraws
                 leave=False,
                 unit="batch",
             )
@@ -920,7 +935,9 @@ class Trainer:
             avg_id   = sum_id   / max(n_batches, 1)
 
             # ── validate ────────────────────────────────────────────────────────
-            top1, top5 = self._validate(val_loader)
+            metrics = self._validate(val_loader)
+            top1 = metrics["top1"]
+            top5 = metrics["top5"]
 
             # ── console row ─────────────────────────────────────────────────────
             mem = ""
@@ -931,18 +948,23 @@ class Trainer:
 
             print(
                 f"{epoch:6d}  {mem:>8}  {avg_loss:9.4f}  {avg_id:8.4f}  "
-                f"{top1:8.4f}  {top5:8.4f}  {lr:9.2e}"
+                f"{top1:8.4f}  {top5:8.4f}  {metrics['f1_macro']:8.4f}  {lr:9.2e}"
             )
 
             # ── CSV ─────────────────────────────────────────────────────────────
             self._log_csv({
-                "epoch":       epoch,
-                "train/loss":  round(avg_loss, 6),
-                "train/id":    round(avg_id,   6),
-                "val/top1":    round(top1,      6),
-                "val/top5":    round(top5,      6),
-                "lr":          round(lr,        8),
-                "time_s":      round(elapsed,   1),
+                "epoch":                epoch,
+                "train/loss":           round(avg_loss, 6),
+                "train/id":             round(avg_id,   6),
+                "val/top1":             round(top1,      6),
+                "val/top5":             round(top5,      6),
+                "val/f1_macro":         round(metrics["f1_macro"],          6),
+                "val/f1_weighted":      round(metrics["f1_weighted"],       6),
+                "val/precision_macro":  round(metrics["precision_macro"],   6),
+                "val/recall_macro":     round(metrics["recall_macro"],      6),
+                "val/balanced_acc":     round(metrics["balanced_accuracy"], 6),
+                "lr":                   round(lr,        8),
+                "time_s":               round(elapsed,   1),
             })
 
             # ── checkpoint ──────────────────────────────────────────────────────
@@ -973,9 +995,17 @@ class Trainer:
     # ── validation ─────────────────────────────────────────────────────────────
 
     @torch.no_grad()
-    def _validate(self, loader: DataLoader) -> tuple[float, float]:
+    def _validate(self, loader: DataLoader) -> dict[str, float]:
+        """Return top1/top5 plus macro/weighted F1, precision, recall, balanced acc.
+
+        Accumulates top-1 predictions and labels across the whole val set, then defers
+        to sklearn for the class-averaged metrics.  zero_division=0 because a held-out
+        val split rarely contains every identity (macro averages over labels present).
+        """
         self.model.eval()
         correct1 = correct5 = total = 0
+        all_pred: list[np.ndarray] = []
+        all_true: list[np.ndarray] = []
         for x_hi, x_lo, labels in loader:
             x_hi   = x_hi.to(self.device, non_blocking=True)
             x_lo   = x_lo.to(self.device, non_blocking=True)
@@ -987,8 +1017,37 @@ class Trainer:
             correct1 += hits[:1].reshape(-1).float().sum().item()
             correct5 += hits[:k].reshape(-1).float().sum().item()
             total    += labels.size(0)
+            all_pred.append(pred_k[:, 0].cpu().numpy())
+            all_true.append(labels.cpu().numpy())
+
         denom = max(total, 1)
-        return correct1 / denom, correct5 / denom
+        top1  = correct1 / denom
+        top5  = correct5 / denom
+
+        if all_true:
+            y_pred = np.concatenate(all_pred)
+            y_true = np.concatenate(all_true)
+            # A held-out val split legitimately predicts identities it doesn't contain;
+            # silence sklearn's per-call "classes not in y_true" noise to keep logs clean.
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                f1_macro = f1_score(y_true, y_pred, average="macro", zero_division=0)
+                f1_weighted = f1_score(y_true, y_pred, average="weighted", zero_division=0)
+                precision_macro = precision_score(y_true, y_pred, average="macro", zero_division=0)
+                recall_macro = recall_score(y_true, y_pred, average="macro", zero_division=0)
+                balanced_accuracy = balanced_accuracy_score(y_true, y_pred)
+        else:
+            f1_macro = f1_weighted = precision_macro = recall_macro = balanced_accuracy = 0.0
+
+        return {
+            "top1":              top1,
+            "top5":              top5,
+            "f1_macro":          float(f1_macro),
+            "f1_weighted":       float(f1_weighted),
+            "precision_macro":   float(precision_macro),
+            "recall_macro":      float(recall_macro),
+            "balanced_accuracy": float(balanced_accuracy),
+        }
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1011,6 +1070,8 @@ def _parse() -> argparse.Namespace:
                    help="hpm=full dual-stream | cnn=CNN only | vit=ViT only | all=cnn→vit→hpm")
     g.add_argument("--smoke-test", action="store_true",
                    help="Run 2-batch sanity check for all 3 modes then exit")
+    g.add_argument("--report-only", action="store_true",
+                   help="Rebuild <name>_report.xlsx from existing results.csv files, then exit")
 
     # ── training ───────────────────────────────────────────────────────────────
     g = p.add_argument_group("training")
@@ -1018,10 +1079,14 @@ def _parse() -> argparse.Namespace:
     g.add_argument("--batch",    type=int,   default=32)
     g.add_argument("--lr",       type=float, default=1e-4)
     g.add_argument("--wd",       type=float, default=0.05,  help="AdamW weight decay")
-    g.add_argument("--seed",     type=int,   default=42)
-    g.add_argument("--patience", type=int,   default=0,     help="Early-stopping patience (0=off)")
+    g.add_argument("--seed",     type=int,   default=42,    help="Single-run seed (see --seeds for --mode all)")
+    g.add_argument("--seeds",    default=None,
+                   help="Comma-separated seeds for --mode all, e.g. 42,43,44 "
+                        "(enables mean±SD across seeds in the Excel report; default: just --seed)")
+    g.add_argument("--patience", type=int,   default=3,     help="Early-stopping patience on val/top1 (0=off)")
     g.add_argument("--workers",  type=int,   default=4,     help="DataLoader workers")
-    g.add_argument("--amp",      action="store_true",       help="Automatic mixed precision (CUDA)")
+    g.add_argument("--amp",      action=argparse.BooleanOptionalAction, default=True,
+                   help="Automatic mixed precision on CUDA (default on; use --no-amp to disable)")
 
     # ── loss weights ───────────────────────────────────────────────────────────
     g = p.add_argument_group("loss weights")
@@ -1112,7 +1177,7 @@ class _TeeLogger:
         self._stdout.flush()
         self._file.flush()
 
-    def __enter__(self) -> "_TeeLogger":
+    def __enter__(self) -> _TeeLogger:
         sys.stdout = self  # type: ignore[assignment]
         return self
 
@@ -1123,7 +1188,7 @@ class _TeeLogger:
 
 def _check_mode_state(
     wts_dir: Path, max_epochs: int
-) -> tuple[str, Optional[Path]]:
+) -> tuple[str, Path | None]:
     """Inspect a mode's weights directory and return its run state.
 
     Returns one of:
@@ -1238,6 +1303,37 @@ def _smoke_test_all(cfg: HPMConfig, n_batches: int = 2) -> bool:
     return all_pass
 
 
+def _parse_seeds(args: argparse.Namespace) -> list[int]:
+    """Seeds for a multi-seed --mode all run.  Defaults to the single --seed."""
+    if not args.seeds:
+        return [args.seed]
+    seeds = [int(s) for s in str(args.seeds).split(",") if s.strip() != ""]
+    return seeds or [args.seed]
+
+
+def _build_report_safe(name: str, seeds: list[int]) -> None:
+    """Build the Excel report; never let a reporting hiccup abort a finished run.
+
+    train_hpm.py is standalone, so the package module is imported lazily (and src/ is
+    added to sys.path as a fallback for non-editable installs).  Missing openpyxl /
+    pandas just prints guidance instead of crashing after hours of training.
+    """
+    try:
+        try:
+            from hpm.utils.results import build_report
+        except ImportError:
+            src = Path(__file__).resolve().parent / "src"
+            if src.is_dir() and str(src) not in sys.path:
+                sys.path.insert(0, str(src))
+            from hpm.utils.results import build_report
+
+        build_report(name, _TRAIN_MODES, seeds)
+    except ImportError as exc:
+        print(f"  [report] skipped — {exc}. Install extras:  pip install pandas openpyxl")
+    except Exception as exc:  # noqa: BLE001 — reporting must never kill training
+        print(f"  [report] failed to build Excel report: {exc}")
+
+
 def main() -> None:
     # Box-drawing chars in the progress tables crash on Windows' default cp1252
     # console; force UTF-8 so every run (incl. resume/overnight) prints cleanly.
@@ -1249,6 +1345,13 @@ def main() -> None:
                 pass
 
     args = _parse()
+    seeds = _parse_seeds(args)
+
+    # ── report-only ───────────────────────────────────────────────────────────────
+    # Rebuild the workbook from whatever results.csv files already exist, no training.
+    if args.report_only:
+        _build_report_safe(args.name, seeds)
+        return
 
     # ── dataset download ────────────────────────────────────────────────────────
     if args.download:
@@ -1284,54 +1387,69 @@ def main() -> None:
             print(f"  name    : {args.name}")
             print(f"  device  : {_device_str}    amp : {args.amp}")
             print(f"  data    : {Path(args.data).resolve()}")
-            print(f"  epochs  : {args.epochs} per model    models : {' → '.join(m.upper() for m in _TRAIN_MODES)}")
+            print(f"  seeds   : {seeds}")
+            _model_chain = ' → '.join(m.upper() for m in _TRAIN_MODES)
+            print(f"  epochs  : {args.epochs} per model    models : {_model_chain}")
+            print(f"  runs    : {len(seeds) * len(_TRAIN_MODES)}"
+                  f"  ({len(_TRAIN_MODES)} models × {len(seeds)} seeds)")
             print(f"  log     : {log_path.resolve()}")
             print(f"{'═' * 70}")
 
-            results: list[tuple[str, str, str]] = []  # (mode, status, detail)
+            results: list[tuple[str, str, str]] = []  # (run, status, detail)
+            total_runs = len(seeds) * len(_TRAIN_MODES)
+            idx = 0
 
-            for idx, mode in enumerate(_TRAIN_MODES, 1):
-                run_name = f"{args.name}_{mode}"
-                wts_dir  = Path("runs") / "hpm" / run_name / "weights"
-                state, resume_path = _check_mode_state(wts_dir, args.epochs)
+            for seed in seeds:
+                for mode in _TRAIN_MODES:
+                    idx += 1
+                    run_name = f"{args.name}_{mode}_seed{seed}"
+                    wts_dir  = Path("runs") / "hpm" / run_name / "weights"
+                    state, resume_path = _check_mode_state(wts_dir, args.epochs)
 
-                print(f"\n{'═' * 70}")
-                if state == "complete":
-                    print(f"  [{idx}/{len(_TRAIN_MODES)}]  {mode.upper()}  [SKIP — already complete]")
+                    tag = f"  [{idx}/{total_runs}]  {mode.upper()} seed={seed}"
+                    print(f"\n{'═' * 70}")
+                    if state == "complete":
+                        print(f"{tag}  [SKIP — already complete]")
+                        print(f"{'═' * 70}")
+                        results.append((run_name, "SKIP", str(wts_dir / "best.pt")))
+                        continue
+                    elif state == "resume":
+                        ck = torch.load(resume_path, map_location="cpu", weights_only=True)
+                        print(f"{tag}  [RESUME from epoch {ck.get('epoch', '?')}]")
+                    else:
+                        print(f"{tag}  [FRESH start]")
                     print(f"{'═' * 70}")
-                    results.append((mode, "SKIP", str(wts_dir / "best.pt")))
-                    continue
-                elif state == "resume":
-                    ckpt_epoch = torch.load(resume_path, map_location="cpu", weights_only=True).get("epoch", "?")
-                    print(f"  [{idx}/{len(_TRAIN_MODES)}]  {mode.upper()}  [RESUME from epoch {ckpt_epoch}]")
-                else:
-                    print(f"  [{idx}/{len(_TRAIN_MODES)}]  {mode.upper()}  [FRESH start]")
-                print(f"{'═' * 70}")
 
-                run_cfg = copy.deepcopy(cfg)
-                run_cfg.mode = mode
-                run_cfg.build_decoders = (
-                    mode == "hpm" and (args.lambda_uni > 0 or args.lambda_aux > 0)
-                )
+                    run_cfg = copy.deepcopy(cfg)
+                    run_cfg.mode = mode
+                    run_cfg.train.seed = seed
+                    run_cfg.build_decoders = (
+                        mode == "hpm" and (args.lambda_uni > 0 or args.lambda_aux > 0)
+                    )
 
-                try:
-                    Trainer(run_cfg, name=run_name, resume=str(resume_path) if resume_path else None).train()
-                    results.append((mode, "OK", str(wts_dir / "best.pt")))
-                except Exception as exc:
-                    tb = traceback.format_exc()
-                    print(f"\n  ✗ {mode.upper()} FAILED: {exc}")
-                    print(tb)
-                    results.append((mode, "FAIL", str(exc)[:80]))
+                    try:
+                        resume_arg = str(resume_path) if resume_path else None
+                        Trainer(run_cfg, name=run_name, resume=resume_arg).train()
+                        results.append((run_name, "OK", str(wts_dir / "best.pt")))
+                    except Exception as exc:
+                        tb = traceback.format_exc()
+                        print(f"\n  ✗ {run_name} FAILED: {exc}")
+                        print(tb)
+                        results.append((run_name, "FAIL", str(exc)[:80]))
 
             # ── final summary ────────────────────────────────────────────────────
             print(f"\n{'═' * 70}")
             print(f"  OVERNIGHT SUMMARY  ·  {time.strftime('%Y-%m-%d %H:%M:%S')}")
             print(f"{'═' * 70}")
-            print(f"  {'Model':<6}  {'Status':<8}  Detail")
-            print(f"  {'─'*6}  {'─'*8}  {'─'*55}")
-            for mode, status, detail in results:
-                print(f"  {mode.upper():<6}  {status:<8}  {detail}")
+            print(f"  {'Run':<28}  {'Status':<8}  Detail")
+            print(f"  {'─'*28}  {'─'*8}  {'─'*33}")
+            for run_name, status, detail in results:
+                print(f"  {run_name:<28}  {status:<8}  {detail}")
             print(f"{'═' * 70}")
+
+            # ── results workbook (mean ± SD across seeds) ─────────────────────────
+            print("\nBuilding results workbook …")
+            _build_report_safe(args.name, seeds)
             print()
     else:
         Trainer(cfg, name=args.name, resume=args.resume).train()
